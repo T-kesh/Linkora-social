@@ -2310,7 +2310,11 @@ fn test_profile_count_decrements_on_delete() {
     let token = Address::generate(&env);
 
     client.set_profile(&user, &String::from_str(&env, "alice"), &token);
-    assert_eq!(client.get_profile_count(), 1, "count must be 1 after creation");
+    assert_eq!(
+        client.get_profile_count(),
+        1,
+        "count must be 1 after creation"
+    );
 
     client.delete_profile(&user);
     assert_eq!(
