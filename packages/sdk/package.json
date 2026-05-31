@@ -7,12 +7,16 @@
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write \"src/**/*.{ts,tsx}\"",
     "build": "echo \"Run generate.sh to regenerate the client from the contract WASM\"",
-    "docs": "typedoc --out docs src/index.ts --tsconfig tsconfig.json"
+    "docs": "typedoc --out docs src/index.ts --tsconfig tsconfig.json",
+    "test": "jest"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.3.0"
   },
   "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.11",
     "typedoc": "^0.26.11",
     "typescript": "^5.8.3"
   }
