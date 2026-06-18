@@ -498,7 +498,7 @@ impl LinkoraContract {
         result
     }
 
-    // ── Social Graph ──────────────────────────────────────────────────────────
+    // ── Social Graph (ADR-001: adjacency-set with per-user counters) ────────
 
     pub fn follow(env: Env, follower: Address, followee: Address) {
         Self::bump_instance(&env);
@@ -508,31 +508,65 @@ impl LinkoraContract {
             panic!("blocked");
         }
 
-        let following_key = StorageKey::Following(follower.clone());
-        let mut following_list: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&following_key)
-            .unwrap_or(Vec::new(&env));
+        let edge_key = StorageKey::Edge(follower.clone(), followee.clone());
 
-        if !following_list.iter().any(|x| x == followee) {
-            following_list.push_back(followee.clone());
-            env.storage()
-                .persistent()
-                .set(&following_key, &following_list);
-            Self::bump(&env, &following_key);
+        // Idempotent: skip if already following
+        if !env.storage().persistent().has(&edge_key) {
+            // 1. Write the edge
+            env.storage().persistent().set(&edge_key, &true);
+            Self::bump(&env, &edge_key);
 
-            let followers_key = StorageKey::Followers(followee.clone());
-            let mut followers_list: Vec<Address> = env
+            // 2. Append to follower's following-index
+            let following_count: u32 = env
                 .storage()
                 .persistent()
-                .get(&followers_key)
-                .unwrap_or(Vec::new(&env));
-            followers_list.push_back(follower.clone());
+                .get(&StorageKey::FollowingCount(follower.clone()))
+                .unwrap_or(0u32);
+            let following_idx_key =
+                StorageKey::FollowingIdx(follower.clone(), following_count);
             env.storage()
                 .persistent()
-                .set(&followers_key, &followers_list);
-            Self::bump(&env, &followers_key);
+                .set(&following_idx_key, &followee);
+            Self::bump(&env, &following_idx_key);
+
+            // Store position for O(1) swap-remove
+            let following_pos_key =
+                StorageKey::FollowingPos(follower.clone(), followee.clone());
+            env.storage()
+                .persistent()
+                .set(&following_pos_key, &following_count);
+            Self::bump(&env, &following_pos_key);
+
+            env.storage()
+                .persistent()
+                .set(&StorageKey::FollowingCount(follower.clone()), &(following_count + 1));
+            Self::bump(&env, &StorageKey::FollowingCount(follower.clone()));
+
+            // 3. Append to followee's followers-index
+            let followers_count: u32 = env
+                .storage()
+                .persistent()
+                .get(&StorageKey::FollowersCount(followee.clone()))
+                .unwrap_or(0u32);
+            let followers_idx_key =
+                StorageKey::FollowersIdx(followee.clone(), followers_count);
+            env.storage()
+                .persistent()
+                .set(&followers_idx_key, &follower);
+            Self::bump(&env, &followers_idx_key);
+
+            // Store position for O(1) swap-remove
+            let followers_pos_key =
+                StorageKey::FollowersPos(followee.clone(), follower.clone());
+            env.storage()
+                .persistent()
+                .set(&followers_pos_key, &followers_count);
+            Self::bump(&env, &followers_pos_key);
+
+            env.storage()
+                .persistent()
+                .set(&StorageKey::FollowersCount(followee.clone()), &(followers_count + 1));
+            Self::bump(&env, &StorageKey::FollowersCount(followee.clone()));
         }
 
         FollowEvent { follower, followee }.publish(&env);
@@ -542,33 +576,27 @@ impl LinkoraContract {
         Self::bump_instance(&env);
         follower.require_auth();
 
-        let following_key = StorageKey::Following(follower.clone());
-        let mut following_list: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&following_key)
-            .unwrap_or(Vec::new(&env));
+        let edge_key = StorageKey::Edge(follower.clone(), followee.clone());
 
-        if let Some(index) = following_list.iter().position(|addr| addr == followee) {
-            following_list.remove(index as u32);
-            env.storage()
-                .persistent()
-                .set(&following_key, &following_list);
-            Self::bump(&env, &following_key);
+        if env.storage().persistent().has(&edge_key) {
+            // 1. Remove the edge
+            env.storage().persistent().remove(&edge_key);
 
-            let followers_key = StorageKey::Followers(followee.clone());
-            let mut followers_list: Vec<Address> = env
-                .storage()
-                .persistent()
-                .get(&followers_key)
-                .unwrap_or(Vec::new(&env));
-            if let Some(f_index) = followers_list.iter().position(|addr| addr == follower) {
-                followers_list.remove(f_index as u32);
-                env.storage()
-                    .persistent()
-                    .set(&followers_key, &followers_list);
-                Self::bump(&env, &followers_key);
-            }
+            // 2. Swap-remove from follower's following-index
+            Self::swap_remove_from_index(
+                &env,
+                &follower,
+                &followee,
+                true, // is_following side
+            );
+
+            // 3. Swap-remove from followee's followers-index
+            Self::swap_remove_from_index(
+                &env,
+                &followee,
+                &follower,
+                false, // is_followers side
+            );
         }
 
         UnfollowEvent { follower, followee }.publish(&env);
@@ -579,16 +607,7 @@ impl LinkoraContract {
             limit > 0 && limit <= MAX_PAGINATION_LIMIT,
             "limit must be between 1 and 50"
         );
-        let key = StorageKey::Following(user);
-        let list: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
-        if !list.is_empty() {
-            Self::bump(&env, &key);
-        }
-        paginate(&env, &list, offset, limit)
+        Self::paginate_index(&env, &user, offset, limit, true)
     }
 
     pub fn get_followers(env: Env, user: Address, offset: u32, limit: u32) -> Vec<Address> {
@@ -596,16 +615,91 @@ impl LinkoraContract {
             limit > 0 && limit <= MAX_PAGE_LIMIT,
             "limit must be between 1 and 50"
         );
-        let key = StorageKey::Followers(user);
-        let list: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
-        if !list.is_empty() {
-            Self::bump(&env, &key);
+        Self::paginate_index(&env, &user, offset, limit, false)
+    }
+
+    /// Admin function to migrate users from the legacy Vec-based social graph
+    /// to the new adjacency-set layout. Processable in chunks of up to 50
+    /// users per call. Idempotent: already-migrated edges are skipped.
+    pub fn migrate_follow_graph(env: Env, users: Vec<Address>) {
+        Self::bump_instance(&env);
+        Self::require_admin(&env);
+
+        assert!(
+            users.len() <= 50,
+            "batch size must not exceed 50 users"
+        );
+
+        for user in users.iter() {
+            let migrated_key = StorageKey::GraphMigrated(user.clone());
+            if env.storage().persistent().has(&migrated_key) {
+                continue; // Already migrated
+            }
+
+            // Migrate following list
+            let following_key = StorageKey::Following(user.clone());
+            if let Some(following_list) = env
+                .storage()
+                .persistent()
+                .get::<_, Vec<Address>>(&following_key)
+            {
+                for followee in following_list.iter() {
+                    let edge_key = StorageKey::Edge(user.clone(), followee.clone());
+                    if !env.storage().persistent().has(&edge_key) {
+                        // Write edge
+                        env.storage().persistent().set(&edge_key, &true);
+                        Self::bump(&env, &edge_key);
+
+                        // Append to following index
+                        let count: u32 = env
+                            .storage()
+                            .persistent()
+                            .get(&StorageKey::FollowingCount(user.clone()))
+                            .unwrap_or(0u32);
+                        let idx_key = StorageKey::FollowingIdx(user.clone(), count);
+                        env.storage().persistent().set(&idx_key, &followee);
+                        Self::bump(&env, &idx_key);
+                        let pos_key = StorageKey::FollowingPos(user.clone(), followee.clone());
+                        env.storage().persistent().set(&pos_key, &count);
+                        Self::bump(&env, &pos_key);
+                        env.storage()
+                            .persistent()
+                            .set(&StorageKey::FollowingCount(user.clone()), &(count + 1));
+                        Self::bump(&env, &StorageKey::FollowingCount(user.clone()));
+
+                        // Also write the followers side for the followee
+                        let f_count: u32 = env
+                            .storage()
+                            .persistent()
+                            .get(&StorageKey::FollowersCount(followee.clone()))
+                            .unwrap_or(0u32);
+                        let f_idx_key = StorageKey::FollowersIdx(followee.clone(), f_count);
+                        env.storage().persistent().set(&f_idx_key, &user);
+                        Self::bump(&env, &f_idx_key);
+                        let f_pos_key = StorageKey::FollowersPos(followee.clone(), user.clone());
+                        env.storage().persistent().set(&f_pos_key, &f_count);
+                        Self::bump(&env, &f_pos_key);
+                        env.storage()
+                            .persistent()
+                            .set(&StorageKey::FollowersCount(followee.clone()), &(f_count + 1));
+                        Self::bump(&env, &StorageKey::FollowersCount(followee.clone()));
+                    }
+                }
+                // Remove old following list
+                env.storage().persistent().remove(&following_key);
+            }
+
+            // Remove old followers list (edges were already written from the
+            // following side; the followers Vec is now redundant)
+            let followers_key = StorageKey::Followers(user.clone());
+            if env.storage().persistent().has(&followers_key) {
+                env.storage().persistent().remove(&followers_key);
+            }
+
+            // Mark user as migrated
+            env.storage().persistent().set(&migrated_key, &true);
+            Self::bump(&env, &migrated_key);
         }
-        paginate(&env, &list, offset, limit)
     }
 
     // ── Block List ────────────────────────────────────────────────────────────
@@ -1200,6 +1294,147 @@ impl LinkoraContract {
         env.storage()
             .instance()
             .extend_ttl(LEDGER_THRESHOLD, LEDGER_BUMP);
+    }
+
+    // ── Adjacency-set helpers (ADR-001) ───────────────────────────────────
+
+    /// O(1) swap-remove from a user's index (following or followers side).
+    ///
+    /// `owner`:  the user whose index we are modifying
+    /// `target`: the address to remove from the index
+    /// `is_following`: true = FollowingIdx/FollowingPos/FollowingCount,
+    ///                 false = FollowersIdx/FollowersPos/FollowersCount
+    fn swap_remove_from_index(
+        env: &Env,
+        owner: &Address,
+        target: &Address,
+        is_following: bool,
+    ) {
+        let pos_key = if is_following {
+            StorageKey::FollowingPos(owner.clone(), target.clone())
+        } else {
+            StorageKey::FollowersPos(owner.clone(), target.clone())
+        };
+        let count_key = if is_following {
+            StorageKey::FollowingCount(owner.clone())
+        } else {
+            StorageKey::FollowersCount(owner.clone())
+        };
+
+        let pos: u32 = env
+            .storage()
+            .persistent()
+            .get(&pos_key)
+            .unwrap_or(0u32);
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&count_key)
+            .unwrap_or(0u32);
+
+        if count == 0 {
+            return;
+        }
+
+        let last = count - 1;
+
+        if pos != last {
+            // Swap the last element into the removed position
+            let last_idx_key = if is_following {
+                StorageKey::FollowingIdx(owner.clone(), last)
+            } else {
+                StorageKey::FollowersIdx(owner.clone(), last)
+            };
+            let last_addr: Address = env
+                .storage()
+                .persistent()
+                .get(&last_idx_key)
+                .expect("index entry missing");
+
+            // Move last entry to the vacated position
+            let target_idx_key = if is_following {
+                StorageKey::FollowingIdx(owner.clone(), pos)
+            } else {
+                StorageKey::FollowersIdx(owner.clone(), pos)
+            };
+            env.storage()
+                .persistent()
+                .set(&target_idx_key, &last_addr);
+            Self::bump(env, &target_idx_key);
+
+            // Update the moved entry's position record
+            let moved_pos_key = if is_following {
+                StorageKey::FollowingPos(owner.clone(), last_addr.clone())
+            } else {
+                StorageKey::FollowersPos(owner.clone(), last_addr.clone())
+            };
+            env.storage().persistent().set(&moved_pos_key, &pos);
+            Self::bump(env, &moved_pos_key);
+
+            // Remove the last index slot
+            env.storage().persistent().remove(&last_idx_key);
+        } else {
+            // Target is the last element; just remove it
+            let last_idx_key = if is_following {
+                StorageKey::FollowingIdx(owner.clone(), last)
+            } else {
+                StorageKey::FollowersIdx(owner.clone(), last)
+            };
+            env.storage().persistent().remove(&last_idx_key);
+        }
+
+        // Remove the target's position entry
+        env.storage().persistent().remove(&pos_key);
+
+        // Decrement the count
+        if last == 0 {
+            env.storage().persistent().remove(&count_key);
+        } else {
+            env.storage().persistent().set(&count_key, &last);
+            Self::bump(env, &count_key);
+        }
+    }
+
+    /// O(limit) pagination over a user's index entries.
+    fn paginate_index(
+        env: &Env,
+        user: &Address,
+        offset: u32,
+        limit: u32,
+        is_following: bool,
+    ) -> Vec<Address> {
+        let count: u32 = if is_following {
+            env.storage()
+                .persistent()
+                .get(&StorageKey::FollowingCount(user.clone()))
+                .unwrap_or(0u32)
+        } else {
+            env.storage()
+                .persistent()
+                .get(&StorageKey::FollowersCount(user.clone()))
+                .unwrap_or(0u32)
+        };
+
+        if offset >= count {
+            return Vec::new(env);
+        }
+
+        let end = (offset + limit).min(count);
+        let mut result = Vec::new(env);
+
+        for seq in offset..end {
+            let idx_key = if is_following {
+                StorageKey::FollowingIdx(user.clone(), seq)
+            } else {
+                StorageKey::FollowersIdx(user.clone(), seq)
+            };
+            if let Some(addr) = env.storage().persistent().get::<_, Address>(&idx_key) {
+                Self::bump(env, &idx_key);
+                result.push_back(addr);
+            }
+        }
+
+        result
     }
 }
 
