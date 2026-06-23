@@ -3254,7 +3254,7 @@ fn test_profile_expiry_detection() {
 
     // Extend instance storage TTL so it doesn't expire when sequence is advanced
     env.as_contract(&client.address, || {
-        env.storage().instance().extend_ttl(100_000, 2_000_000);
+        env.storage().instance().extend_ttl(2_000_000, 2_000_000);
     });
 
     // Advance ledger sequence past the profile key's TTL (535,000), but within the extended instance storage TTL
