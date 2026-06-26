@@ -2,8 +2,7 @@ import express, { Request, Response, NextFunction } from "express";
 import { Pool as PgPool } from "pg";
 import { Database } from "../db";
 import { logger } from "../logger";
-import { getBackfillState } from "../stream";
-import { rateLimitRead, rateLimitWrite } from "../middleware/rateLimit";
+import { rateLimit as apiLimiter, rateLimitRead, rateLimitWrite } from "../middleware/rateLimit";
 import { requireStellarAuth } from "../middleware/stellarAuth";
 import { createProfilesRouter } from "./routes/profiles";
 import { createPostsRouter } from "./routes/posts";
@@ -11,6 +10,7 @@ import { createFollowsRouter } from "./routes/follows";
 import { createPoolsRouter } from "./routes/pools";
 import { createStateRootRouter } from "./routes/stateRoot";
 import { createNotificationsRouter } from "./routes/notifications";
+import { createGovernanceRouter } from "./routes/governance";
 import { isFenced } from "../gossip";
 import {
   defaultNotificationService,
@@ -63,6 +63,7 @@ export function createApp(db: Database, pg?: PgPool): express.Application {
   app.use("/api/posts", createPostsRouter(db));
   app.use("/api/follows", createFollowsRouter(db));
   app.use("/api/pools", createPoolsRouter(db));
+  app.use("/api/governance", createGovernanceRouter(db));
 
   const notificationService = pg
     ? new NotificationService({ deviceTokenStore: new PostgresDeviceTokenStore(pg) })
