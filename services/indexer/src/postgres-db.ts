@@ -245,6 +245,83 @@ export class PostgresDatabase implements Database {
     return { posts, total };
   }
 
+  /**
+   * Full-text search over posts.content using the pre-built GIN tsvector index.
+   *
+   * Input sanitisation: each whitespace-separated token is treated as a
+   * prefix-search word (appended with ":*") so partial words match, and
+   * the tokens are joined with " & " (AND semantics).  This avoids passing
+   * raw user input to `to_tsquery` which would throw on special characters.
+   */
+  async searchPosts(filters: {
+    q: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ posts: Post[]; total: number }> {
+    const { q, limit, offset } = filters;
+
+    // Sanitise: strip anything that is not alphanumeric / Unicode word chars,
+    // then build a safe websearch-style tsquery string.
+    const sanitised = q
+      .trim()
+      .replace(/[^\w\s]/gu, " ")
+      .trim();
+
+    if (!sanitised) {
+      return { posts: [], total: 0 };
+    }
+
+    // Build prefix-match tsquery: each token becomes "token:*"
+    const tsQuery = sanitised
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((t) => `${t}:*`)
+      .join(" & ");
+
+    const totalRes = await this.pool.query(
+      `
+      SELECT COUNT(*)::int AS total
+      FROM posts
+      WHERE deleted_at IS NULL
+        AND content_tsv @@ to_tsquery('english', $1)
+      `,
+      [tsQuery]
+    );
+    const total = totalRes.rows[0]?.total ?? 0;
+
+    const res = await this.pool.query(
+      `
+      SELECT
+        id,
+        author,
+        deleted_at IS NOT NULL AS deleted,
+        tip_total,
+        like_count,
+        extract(epoch from created_at)::bigint AS created_ledger,
+        CASE WHEN deleted_at IS NULL THEN NULL ELSE extract(epoch from deleted_at)::bigint END AS deleted_ledger,
+        ts_rank(content_tsv, to_tsquery('english', $1)) AS rank
+      FROM posts
+      WHERE deleted_at IS NULL
+        AND content_tsv @@ to_tsquery('english', $1)
+      ORDER BY rank DESC, created_at DESC
+      OFFSET $2 LIMIT $3
+      `,
+      [tsQuery, offset, limit]
+    );
+
+    const posts: Post[] = res.rows.map((row) => ({
+      id: BigInt(row.id),
+      author: row.author,
+      deleted: row.deleted,
+      tip_total: BigInt(row.tip_total),
+      like_count: BigInt(row.like_count),
+      created_ledger: Number(row.created_ledger),
+      deleted_ledger: row.deleted_ledger === null ? null : Number(row.deleted_ledger),
+    }));
+
+    return { posts, total };
+  }
+
   // ───────────────────────────────── Likes ────────────────────────────────────
 
   async upsertLike(like: Like): Promise<boolean> {

@@ -91,6 +91,11 @@ export interface Database {
     limit: number;
     offset: number;
   }): Promise<{ posts: Post[]; total: number }>;
+  searchPosts(filters: {
+    q: string;
+    limit: number;
+    offset: number;
+  }): Promise<{ posts: Post[]; total: number }>;
   getFollowers(
     address: string,
     limit: number,
