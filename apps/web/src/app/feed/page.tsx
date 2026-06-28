@@ -472,7 +472,7 @@ export default function FeedPage() {
                         />
                       </svg>
                     </div>
-                    <h3 className="text-lg font-bold mb-1">You&apos;re not following anyone yet</h3>
+                    <h2 className="text-lg font-bold mb-1">You&apos;re not following anyone yet</h2>
                     <p className="text-[var(--text-muted)] text-sm mb-6 max-w-xs mx-auto">
                       Follow creators you like to see their latest posts in your feed.
                     </p>
@@ -515,7 +515,7 @@ export default function FeedPage() {
                         />
                       </svg>
                     </div>
-                    <h3 className="text-lg font-bold mb-1">No posts found</h3>
+                    <h2 className="text-lg font-bold mb-1">No posts found</h2>
                     <p className="text-[var(--text-muted)] text-sm mb-6">
                       {activeTab === "following"
                         ? "Accounts you follow haven't posted yet."
@@ -535,29 +535,16 @@ export default function FeedPage() {
             ) : (
               /* Feed list */
               <>
-                <AnimatedList
-                  items={posts}
-                  getKey={(post) => String(post.id)}
-                  className="space-y-4"
-                  renderItem={(post, state) => (
-                    <div
-                      key={String(post.id)}
-                      className={`animated-list-item ${
-                        state === "entering"
-                          ? "animated-list-item--entering"
-                          : state === "exiting"
-                            ? "animated-list-item--exiting"
-                            : ""
-                      }`}
-                    >
-                      <InteractivePostCard
-                        post={post}
-                        currentUserAddress={currentUserAddress}
-                        onTipClick={handleOpenTipModal}
-                      />
-                    </div>
-                  )}
-                />
+                <div className="space-y-4" role="feed" aria-label="Post feed">
+                  {posts.map((post) => (
+                    <InteractivePostCard
+                      key={post.id}
+                      post={post}
+                      currentUserAddress={currentUserAddress}
+                      onTipClick={handleOpenTipModal}
+                    />
+                  ))}
+                </div>
 
                 {/* Infinite Scroll Sentinel / Loading More */}
                 {hasMore && (
@@ -588,6 +575,7 @@ export default function FeedPage() {
               <button
                 onClick={handleCloseTipModal}
                 className="text-[var(--text-muted)] hover:text-[var(--foreground)] text-xl transition-colors"
+                aria-label="Close tip modal"
               >
                 ✕
               </button>
